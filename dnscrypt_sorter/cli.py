@@ -2,19 +2,28 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 
-from .filters import SUPPORTED_PROTOCOLS, filter_resolvers
+from .filters import (
+    IP_VERSION_OPTIONS,
+    ResolverFilterCriteria,
+    SUPPORTED_PROTOCOLS,
+    describe_filter_criteria,
+    filter_resolvers,
+)
 from .latency import ProbeOptions, measure_resolver
 from .models import MeasurementResult, Resolver
 from .source import SourceError, available_catalog_names, expand_catalogs, fetch_catalogs
-from .ui import PromptBack, RunSummary, TerminalUI, render_plain_table
+from .ui import PromptBack, PromptExit, RunSummary, TerminalUI, render_plain_table
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,10 +42,19 @@ class RunArtifacts:
     summary: RunSummary
 
 
+class RunCancelled(Exception):
+    """Raised when the current latency run is cancelled by the user."""
+
+
 @dataclass(slots=True)
 class InteractiveWizardState:
     catalogs: tuple[str, ...] = ("public-resolvers",)
-    protocols: tuple[str, ...] = ("DNSCrypt",)
+    protocols: tuple[str, ...] = SUPPORTED_PROTOCOLS
+    require_nofilter: bool = False
+    require_nolog: bool = False
+    require_dnssec: bool = False
+    ip_version: str = "any"
+    countries: tuple[str, ...] = ()
     output_mode: str = "top"
     top: int = 50
 
@@ -72,7 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-catalogs", action="store_true", help="print supported official catalogs and exit")
     parser.add_argument("--list-protos", action="store_true", help="print supported protocol filters and exit")
     parser.add_argument("--cache-dir", default=".dnscrypt-cache", help="directory for cached catalog files")
-    parser.add_argument("--filter-mode", choices=["strict", "catalog", "none"], default="strict", help="resolver filter profile")
+    parser.add_argument("--require-nofilter", action="store_true", help="only keep resolvers advertising nofilter")
+    parser.add_argument("--require-nolog", action="store_true", help="only keep resolvers advertising nolog")
+    parser.add_argument("--dnssec-only", action="store_true", help="only keep resolvers advertising DNSSEC support")
+    parser.add_argument("--ip-version", choices=IP_VERSION_OPTIONS, default="any", help="limit results to ipv4, ipv6, or any")
+    parser.add_argument("--country", action="append", dest="countries", help="country filter; may be passed multiple times")
     parser.add_argument("--profile", choices=tuple(PROBE_PROFILES), default="balanced", help="probe depth profile")
     parser.add_argument("-n", "--number-ping", type=int, help="override number of probe attempts per resolver")
     parser.add_argument("-p", "--ping-delay", type=float, help="override delay between attempts against the same resolver")
@@ -115,14 +137,20 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.perf_counter()
     selected_catalogs, selected_protocols = resolve_selections(args, ui)
-    artifacts = execute_run(
-        args=args,
-        ui=ui,
-        selected_catalogs=selected_catalogs,
-        selected_protocols=selected_protocols,
-        output_mode="all" if args.all else "top",
-        top=args.top,
-    )
+    criteria = resolve_filter_criteria(args, selected_protocols)
+    try:
+        artifacts = execute_run(
+            args=args,
+            ui=ui,
+            selected_catalogs=selected_catalogs,
+            selected_protocols=selected_protocols,
+            criteria=criteria,
+            output_mode="all" if args.all else "top",
+            top=args.top,
+        )
+    except RunCancelled:
+        ui.print_message("Check cancelled.", style="yellow")
+        return 130
     if artifacts is None:
         return 1
 
@@ -140,18 +168,33 @@ def main(argv: list[str] | None = None) -> int:
 
 def run_interactive_wizard(args: argparse.Namespace, ui: TerminalUI) -> int:
     state = InteractiveWizardState()
-    step = "catalogs"
+    step = "main_menu"
 
     while True:
-        if step == "catalogs":
-            state.catalogs = tuple(
-                ui.prompt_multi_select(
-                    "Select catalogs to download and test:",
-                    options=available_catalog_names(),
-                    default=state.catalogs,
-                    allow_back=False,
+        if step == "main_menu":
+            try:
+                ui.prompt_single_select(
+                    "Main menu",
+                    options=("Start new check",),
+                    allow_exit=True,
                 )
-            )
+            except PromptExit:
+                return 0
+            step = "catalogs"
+            continue
+
+        if step == "catalogs":
+            try:
+                state.catalogs = tuple(
+                    ui.prompt_multi_select(
+                        "Select catalogs to download and test:",
+                        options=available_catalog_names(),
+                        default=state.catalogs,
+                        allow_exit=True,
+                    )
+                )
+            except PromptExit:
+                return 0
             step = "protocols"
             continue
 
@@ -168,6 +211,57 @@ def run_interactive_wizard(args: argparse.Namespace, ui: TerminalUI) -> int:
             except PromptBack:
                 step = "catalogs"
                 continue
+            step = "filters"
+            continue
+
+        if step == "filters":
+            try:
+                selected_filters = set(
+                    ui.prompt_multi_select(
+                        "Select optional resolver filters, or choose 'I don't know':",
+                        options=FILTER_OPTIONS,
+                        default=selected_filter_options(state),
+                        allow_back=True,
+                    )
+                )
+            except PromptBack:
+                step = "protocols"
+                continue
+
+            if "I don't know (continue without extra filters)" in selected_filters:
+                selected_filters = set()
+
+            state.require_nofilter = "Require nofilter" in selected_filters
+            state.require_nolog = "Require nolog" in selected_filters
+            state.require_dnssec = "Require DNSSEC" in selected_filters
+            if "Filter by country" not in selected_filters:
+                state.countries = ()
+
+            try:
+                ip_choice = ui.prompt_single_select(
+                    "Which IP version should be allowed?",
+                    options=IP_VERSION_LABELS,
+                    default=ip_version_label(state.ip_version),
+                    allow_back=True,
+                )
+            except PromptBack:
+                continue
+            state.ip_version = IP_VERSION_VALUES[ip_choice]
+
+            if "Filter by country" in selected_filters:
+                try:
+                    state.countries = tuple(
+                        parse_country_list(
+                            ui.prompt_text(
+                                "Enter country names separated by commas",
+                                default=", ".join(state.countries) if state.countries else None,
+                                allow_back=True,
+                                validator=validate_country_list,
+                            )
+                        )
+                    )
+                except PromptBack:
+                    continue
             step = "output_mode"
             continue
 
@@ -180,7 +274,7 @@ def run_interactive_wizard(args: argparse.Namespace, ui: TerminalUI) -> int:
                     allow_back=True,
                 )
             except PromptBack:
-                step = "protocols"
+                step = "filters"
                 continue
 
             if output_choice == "All results":
@@ -205,23 +299,30 @@ def run_interactive_wizard(args: argparse.Namespace, ui: TerminalUI) -> int:
             continue
 
         if step == "run":
-            artifacts = execute_run(
-                args=args,
-                ui=ui,
-                selected_catalogs=state.catalogs,
-                selected_protocols=state.protocols,
-                output_mode=state.output_mode,
-                top=state.top,
-            )
+            ui.print_message("Press Ctrl+C during checking to stop and return to the main menu.", style="yellow")
+            try:
+                artifacts = execute_run(
+                    args=args,
+                    ui=ui,
+                    selected_catalogs=state.catalogs,
+                    selected_protocols=state.protocols,
+                    criteria=criteria_from_state(state),
+                    output_mode=state.output_mode,
+                    top=state.top,
+                )
+            except RunCancelled:
+                ui.print_message("Check cancelled. Returning to the main menu.", style="yellow")
+                step = "main_menu"
+                continue
             if artifacts is None:
-                ui.print_message("No results from the check. Returning to settings.", style="yellow")
-                step = "output_mode"
+                ui.print_message("No results from the check. Returning to filter selection.", style="yellow")
+                step = "filters"
                 continue
 
             ui.print_results(artifacts.displayed_results, summary=artifacts.summary, stamp_mode=args.stamp_mode)
             next_action = handle_results_menu(ui, artifacts)
             if next_action == "main_menu":
-                step = "catalogs"
+                step = "main_menu"
                 continue
             if next_action == "back":
                 step = "output_mode"
@@ -272,19 +373,16 @@ def describe_output_selection(output_mode: str, top: int, displayed_count: int) 
 
 
 def no_matches_message(
-    filter_mode: str,
+    criteria: ResolverFilterCriteria,
     catalogs: tuple[str, ...],
     protocols: tuple[str, ...],
 ) -> str:
-    if filter_mode == "strict":
-        return (
-            "No resolvers matched the strict Europe/DNSCrypt/nofilter/nolog/IPv4 filter. "
-            f"Selected catalogs: {', '.join(catalogs)}. Selected proto: {', '.join(protocols)}. "
-            "Try a different catalog/proto set or use --filter-mode catalog / --filter-mode none."
-        )
     return (
-        "No measurable resolvers were found for the selected filters. "
-        f"Catalogs: {', '.join(catalogs)}. Proto: {', '.join(protocols)}."
+        "No resolvers matched the selected filters. "
+        f"Catalogs: {', '.join(catalogs)}. "
+        f"Proto: {', '.join(protocols)}. "
+        f"Filters: {describe_filter_criteria(criteria)}. "
+        "Try relaxing protocol, privacy, country, or IP version filters."
     )
 
 
@@ -293,6 +391,7 @@ def execute_run(
     ui: TerminalUI,
     selected_catalogs: tuple[str, ...],
     selected_protocols: tuple[str, ...],
+    criteria: ResolverFilterCriteria,
     output_mode: str,
     top: int,
 ) -> RunArtifacts | None:
@@ -308,15 +407,15 @@ def execute_run(
         return None
 
     with ui.status("Applying resolver filters..."):
-        filtered = filter_resolvers(catalog, mode=args.filter_mode, allowed_protocols=set(selected_protocols))
+        filtered = filter_resolvers(catalog, criteria=criteria)
     if not filtered:
-        print(no_matches_message(args.filter_mode, selected_catalogs, selected_protocols), file=sys.stderr)
+        print(no_matches_message(criteria, selected_catalogs, selected_protocols), file=sys.stderr)
         return None
 
     if args.verbose:
         print(f"Loaded {len(catalog)} resolvers from selected catalogs", file=sys.stderr)
         print(f"Filtered down to {len(filtered)} candidate resolvers", file=sys.stderr)
-        print(f"Filter mode: {args.filter_mode}", file=sys.stderr)
+        print(f"Filters: {describe_filter_criteria(criteria)}", file=sys.stderr)
         print(f"Protocols: {', '.join(selected_protocols)}", file=sys.stderr)
         print(f"Profile: {args.profile}", file=sys.stderr)
         print(f"Using {workers} worker(s)", file=sys.stderr)
@@ -344,12 +443,12 @@ def execute_run(
         summary=RunSummary(
             catalogs=selected_catalogs,
             protocols=selected_protocols,
+            filter_selection=describe_filter_criteria(criteria),
             output_selection=describe_output_selection(output_mode, top, len(displayed)),
             total_loaded=len(catalog),
             total_filtered=len(filtered),
             total_responded=len(ranked),
             total_displayed=len(displayed),
-            filter_mode=args.filter_mode,
             profile=args.profile,
             expected_attempts=expected_attempts,
         ),
@@ -359,29 +458,105 @@ def execute_run(
 def resolve_selections(args: argparse.Namespace, ui: TerminalUI) -> tuple[tuple[str, ...], tuple[str, ...]]:
     selected_catalogs = tuple(expand_catalogs(args.catalogs))
     selected_protocols = tuple(expand_protocols(args.protocols))
-    if should_prompt_for_selection(args):
-        selected_catalogs = tuple(
-            ui.prompt_multi_select(
-                "Select catalogs to download and test:",
-                options=available_catalog_names(),
-                default=(selected_catalogs[0],) if selected_catalogs else ("public-resolvers",),
-            )
-        )
-        selected_protocols = tuple(
-            ui.prompt_multi_select(
-                "Select protocols to test:",
-                options=SUPPORTED_PROTOCOLS,
-                default=("DNSCrypt",),
-            )
-        )
     return selected_catalogs, selected_protocols
 
 
 def expand_protocols(protocols: list[str] | None) -> list[str]:
-    requested = list(protocols or ["DNSCrypt"])
+    requested = list(protocols or list(SUPPORTED_PROTOCOLS))
     if "all" in requested:
         return list(SUPPORTED_PROTOCOLS)
     return requested
+
+
+def normalize_country_filters(values: list[str] | None) -> tuple[str, ...]:
+    if not values:
+        return ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for country in parse_country_list(value):
+            key = country.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(country)
+    return tuple(normalized)
+
+
+def parse_country_list(value: str) -> list[str]:
+    return [country.strip() for country in value.split(",") if country.strip()]
+
+
+def validate_country_list(value: str) -> str:
+    if not parse_country_list(value):
+        raise ValueError("Enter at least one country name.")
+    return value
+
+
+def resolve_filter_criteria(
+    args: argparse.Namespace,
+    selected_protocols: tuple[str, ...],
+) -> ResolverFilterCriteria:
+    return ResolverFilterCriteria(
+        allowed_protocols=frozenset(selected_protocols),
+        require_nofilter=args.require_nofilter,
+        require_nolog=args.require_nolog,
+        require_dnssec=args.dnssec_only,
+        ip_version=args.ip_version,
+        countries=normalize_country_filters(args.countries),
+    )
+
+
+def criteria_from_state(state: InteractiveWizardState) -> ResolverFilterCriteria:
+    return ResolverFilterCriteria(
+        allowed_protocols=frozenset(state.protocols),
+        require_nofilter=state.require_nofilter,
+        require_nolog=state.require_nolog,
+        require_dnssec=state.require_dnssec,
+        ip_version=state.ip_version,
+        countries=state.countries,
+    )
+
+
+FILTER_OPTIONS = (
+    "I don't know (continue without extra filters)",
+    "Require nofilter",
+    "Require nolog",
+    "Require DNSSEC",
+    "Filter by country",
+)
+
+IP_VERSION_LABELS = (
+    "Any IP version",
+    "IPv4 only",
+    "IPv6 only",
+)
+
+IP_VERSION_VALUES = {
+    "Any IP version": "any",
+    "IPv4 only": "ipv4",
+    "IPv6 only": "ipv6",
+}
+
+
+def selected_filter_options(state: InteractiveWizardState) -> tuple[str, ...]:
+    selected: list[str] = []
+    if state.require_nofilter:
+        selected.append("Require nofilter")
+    if state.require_nolog:
+        selected.append("Require nolog")
+    if state.require_dnssec:
+        selected.append("Require DNSSEC")
+    if state.countries:
+        selected.append("Filter by country")
+    return tuple(selected)
+
+
+def ip_version_label(value: str) -> str:
+    for label, internal_value in IP_VERSION_VALUES.items():
+        if internal_value == value:
+            return label
+    return "Any IP version"
 
 
 def should_prompt_for_selection(args: argparse.Namespace) -> bool:
@@ -420,11 +595,6 @@ def handle_results_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
 
 def handle_save_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
     save_formats = ("txt", "json", "csv")
-    default_paths = {
-        "txt": "dnscrypt-results.txt",
-        "json": "dnscrypt-results.json",
-        "csv": "dnscrypt-results.csv",
-    }
 
     while True:
         try:
@@ -441,7 +611,7 @@ def handle_save_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
             try:
                 destination = ui.prompt_text(
                     "Enter file path to save",
-                    default=default_paths[save_format],
+                    default=build_default_export_name(artifacts, save_format),
                     allow_back=True,
                     validator=validate_output_path,
                 )
@@ -482,13 +652,39 @@ def save_results(artifacts: RunArtifacts, destination: Path, save_format: str) -
     raise ValueError(f"Unsupported save format: {save_format}")
 
 
+def build_default_export_name(
+    artifacts: RunArtifacts,
+    save_format: str,
+    date_prefix: str | None = None,
+) -> str:
+    date_prefix = date_prefix or datetime.now().strftime("%Y%m%d")
+    catalogs_slug = join_slug_parts(artifacts.summary.catalogs)
+    protocols_slug = join_slug_parts(artifacts.summary.protocols)
+    filters_slug = slugify_component(artifacts.summary.filter_selection)
+    return (
+        f"{date_prefix}-catalogs-{catalogs_slug}"
+        f"-protos-{protocols_slug}"
+        f"-filters-{filters_slug}.{save_format}"
+    )
+
+
+def join_slug_parts(values: tuple[str, ...]) -> str:
+    slug = "-".join(filter(None, (slugify_component(value) for value in values)))
+    return slug or "none"
+
+
+def slugify_component(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "none"
+
+
 def build_text_export(artifacts: RunArtifacts) -> str:
     summary_lines = [
         "Run Summary",
         f"catalogs: {', '.join(artifacts.summary.catalogs)}",
         f"proto: {', '.join(artifacts.summary.protocols)}",
+        f"filters: {artifacts.summary.filter_selection}",
         f"output: {artifacts.summary.output_selection}",
-        f"filter: {artifacts.summary.filter_mode}",
         f"profile: {artifacts.summary.profile}",
         f"loaded: {artifacts.summary.total_loaded}",
         f"candidates: {artifacts.summary.total_filtered}",
@@ -558,12 +754,14 @@ def rank_resolvers(
     monitor=None,
 ) -> list[MeasurementResult]:
     results: list[MeasurementResult] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = []
+    cancel_event = Event()
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = []
+    try:
         for index, resolver in enumerate(resolvers):
             if server_delay:
                 time.sleep(server_delay)
-            futures.append(executor.submit(measure_resolver, resolver, options))
+            futures.append(executor.submit(measure_resolver, resolver, options, cancel_event))
             if monitor is not None:
                 monitor.scheduled()
             if verbose and (index + 1) % 10 == 0:
@@ -577,6 +775,13 @@ def rank_resolvers(
                 monitor.completed(result)
             if verbose and index % 10 == 0:
                 print(f"Collected {index}/{len(futures)} probe results", file=sys.stderr)
+    except KeyboardInterrupt as exc:
+        cancel_event.set()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise RunCancelled() from exc
+    finally:
+        if not cancel_event.is_set():
+            executor.shutdown(wait=True)
 
     return sorted(
         results,

@@ -1,4 +1,5 @@
 import unittest
+from threading import Event
 from unittest.mock import patch
 
 from dnscrypt_sorter.latency import ProbeOptions, measure_resolver, summarize_samples
@@ -43,6 +44,15 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(result.successful_attempts, 2)
         self.assertEqual(result.attempted_probes, 3)
         self.assertAlmostEqual(result.reliability, 2 / 3, places=6)
+
+    def test_measure_resolver_stops_when_cancelled(self) -> None:
+        options = ProbeOptions(attempts=3, ping_delay=0.0, timeout=0.5, tcp_only=False)
+        cancel_event = Event()
+        cancel_event.set()
+
+        result = measure_resolver(make_resolver(), options, cancel_event=cancel_event)
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

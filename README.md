@@ -26,9 +26,10 @@ python3 ping_dnscrypt.py
 
 There you can choose multiple catalogs and multiple protocols to test. The interactive wizard now also lets you:
 
+- choose optional filters such as `nofilter`, `nolog`, `DNSSEC`, IP version, and countries, or use the built-in `I don't know` option
 - choose whether to show `top N` or all results
-- save the final result as `txt`, `json` or `csv`
-- go back to the previous step with `back`
+- save the final result as `txt`, `json` or `csv` with an auto-generated name based on date and selected categories
+- go back to the previous step with `0`
 - return to the main menu after results
 
 You can still select catalogs explicitly with flags or use `--catalog all`.
@@ -45,15 +46,17 @@ Protocols can now be selected explicitly, including multiple values:
 
 You can pass `--proto` multiple times, or choose them interactively on startup.
 
-## Filter modes
+## Explicit filters
 
-Three filter modes are available:
+Filtering is now fully explicit. Instead of fixed presets, you can combine the criteria you want:
 
-- `strict`: strict Europe + `DNSCrypt` + `nofilter` + `nolog` + `IPv4`
-- `catalog`: broader measurable candidates from the selected catalogs
-- `none`: only require a measurable non-IPv6 endpoint with a valid `sdns://` stamp
+- `--require-nofilter`
+- `--require-nolog`
+- `--dnssec-only`
+- `--ip-version any|ipv4|ipv6`
+- `--country NAME` and repeat it as needed
 
-The default remains `strict`.
+If you do not pass any of these flags, the tool keeps the default behavior neutral and only requires resolvers to be measurable.
 
 ## Probe profiles
 
@@ -88,6 +91,8 @@ Terminal output now includes:
 
 Progress is written to `stderr`, so machine-readable output can still be redirected safely from `stdout`.
 
+During interactive latency checks you can press `Ctrl+C` to stop the current run and return to the main menu.
+
 ## Usage
 
 Run the legacy entry point:
@@ -99,7 +104,7 @@ python3 ping_dnscrypt.py --catalog public-resolvers --profile balanced -t --top 
 Or use the package entry point:
 
 ```bash
-python3 -m dnscrypt_sorter.cli --catalog all --filter-mode catalog --profile deep -t --all
+python3 -m dnscrypt_sorter.cli --catalog all --proto all --require-nolog --ip-version ipv4 --profile deep -t --all
 ```
 
 Useful options:
@@ -109,7 +114,11 @@ Useful options:
 - `--list-catalogs`: print supported catalog names
 - `--proto NAME`: select protocol to test, repeatable
 - `--list-protos`: print supported protocol names
-- `--filter-mode strict|catalog|none`
+- `--require-nofilter`
+- `--require-nolog`
+- `--dnssec-only`
+- `--ip-version any|ipv4|ipv6`
+- `--country NAME`
 - `--profile fast|balanced|deep`
 - `--top N`: print the fastest `N` results
 - `--all`: print all successful results
@@ -123,33 +132,34 @@ The default interactive flow is now:
 
 1. choose one or more catalogs
 2. choose one or more protocols
-3. choose result size: `top N` or `all`
-4. run checks
-5. save results or return to the main menu
+3. choose optional filters
+4. choose result size: `top N` or `all`
+5. run checks
+6. save results or return to the main menu
 
-At every wizard step after the first one you can type `back` to return to the previous menu.
+At every wizard step after the first one you can type `0` to return to the previous menu. In the main menu and on the first catalog step, `0` exits the program.
 
 Examples:
 
-Check strict European DNSCrypt resolvers and show only top 10:
+Check DNSCrypt resolvers from `public-resolvers` with `nofilter`, `nolog`, and IPv4 only, then show the top 10:
 
 ```bash
-python3 ping_dnscrypt.py --catalog public-resolvers --proto DNSCrypt --profile balanced -t --top 10
+python3 ping_dnscrypt.py --catalog public-resolvers --proto DNSCrypt --require-nofilter --require-nolog --ip-version ipv4 --profile balanced -t --top 10
 ```
 
-Check all official catalogs with a broader filter and print everything:
+Check all official catalogs, keep only DoH endpoints in Germany, and print everything:
 
 ```bash
-python3 ping_dnscrypt.py --catalog all --proto all --filter-mode catalog --profile deep -t --all
+python3 ping_dnscrypt.py --catalog all --proto DoH --country Germany --profile deep -t --all
 ```
 
 Emit JSON with full stamps:
 
 ```bash
-python3 ping_dnscrypt.py --catalog public-resolvers --top 25 --json
+python3 ping_dnscrypt.py --catalog public-resolvers --proto all --top 25 --json
 ```
 
-Save results non-interactively by redirecting output if needed, or use the built-in wizard save step in interactive mode.
+Save results non-interactively by redirecting output if needed, or use the built-in wizard save step in interactive mode. The suggested filename now includes the current date plus the selected catalogs, protocols, and filters.
 
 ## Credits
 

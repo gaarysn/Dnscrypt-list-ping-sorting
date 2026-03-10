@@ -8,6 +8,7 @@ import struct
 import time
 from dataclasses import dataclass
 from statistics import fmean, pstdev
+from threading import Event
 
 from .models import MeasurementResult, Resolver
 
@@ -20,15 +21,23 @@ class ProbeOptions:
     tcp_only: bool = False
 
 
-def measure_resolver(resolver: Resolver, options: ProbeOptions) -> MeasurementResult | None:
+def measure_resolver(
+    resolver: Resolver,
+    options: ProbeOptions,
+    cancel_event: Event | None = None,
+) -> MeasurementResult | None:
     address = resolver.addrs[0]
     ports = tuple(sorted(set(resolver.ports or (443, 53))))
     samples: list[float] = []
     selected_port: int | None = None
 
     for attempt_index in range(options.attempts):
+        if cancel_event is not None and cancel_event.is_set():
+            break
         if attempt_index:
             time.sleep(options.ping_delay)
+            if cancel_event is not None and cancel_event.is_set():
+                break
 
         latency, port = probe_once(
             address=address,
@@ -36,6 +45,7 @@ def measure_resolver(resolver: Resolver, options: ProbeOptions) -> MeasurementRe
             timeout=options.timeout,
             tcp_only=options.tcp_only,
             sequence=attempt_index,
+            cancel_event=cancel_event,
         )
         if latency is not None:
             samples.append(latency)
@@ -81,7 +91,10 @@ def probe_once(
     timeout: float,
     tcp_only: bool,
     sequence: int,
+    cancel_event: Event | None = None,
 ) -> tuple[float | None, int | None]:
+    if cancel_event is not None and cancel_event.is_set():
+        return None, None
     for port in ports:
         latency = tcp_connect_latency(address, port, timeout)
         if latency is not None:

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dnscrypt-list-ping-sorting"
 version = "0.2.0"
-description = "Rank strict European DNSCrypt resolvers by measured latency"
+description = "Rank measurable DNS resolvers from official DNSCrypt catalogs by latency"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [

@@ -10,7 +10,6 @@ from typing import Iterable
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from .filters import EUROPEAN_COUNTRIES
 from .models import Resolver
 
 DEFAULT_CATALOG = "public-resolvers"
@@ -325,8 +324,13 @@ def is_ipv6_address(value: str) -> bool:
 
 
 def infer_country(name: str, description: str) -> str:
-    haystack = f"{name}\n{description}".lower()
-    for country in sorted(EUROPEAN_COUNTRIES, key=len, reverse=True):
-        if re.search(rf"\b{re.escape(country.lower())}\b", haystack):
-            return country
+    haystack = f"{name}\n{description}"
+    patterns = (
+        r"\b(?:in|based in|hosted in)\s+([A-Z][A-Za-z]+(?:[ -][A-Z][A-Za-z]+)*)\b",
+        r"^([A-Z][A-Za-z]+(?:[ -][A-Z][A-Za-z]+)*)\s*,",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, haystack, flags=re.IGNORECASE | re.MULTILINE)
+        if match:
+            return match.group(1).strip()
     return ""

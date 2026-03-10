@@ -32,12 +32,12 @@ except ImportError:
 class RunSummary:
     catalogs: tuple[str, ...]
     protocols: tuple[str, ...]
+    filter_selection: str
     output_selection: str
     total_loaded: int
     total_filtered: int
     total_responded: int
     total_displayed: int
-    filter_mode: str
     profile: str
     expected_attempts: int
 
@@ -99,6 +99,10 @@ class PromptBack(Exception):
     """Raised when the user requests to go back in the wizard."""
 
 
+class PromptExit(Exception):
+    """Raised when the user requests to exit the wizard."""
+
+
 class TerminalUI:
     def __init__(self, enable_rich: bool = True) -> None:
         self.use_rich = enable_rich and RICH_AVAILABLE
@@ -123,7 +127,9 @@ class TerminalUI:
         options: Sequence[str],
         default: Sequence[str] | None = None,
         allow_back: bool = False,
+        allow_exit: bool = False,
     ) -> list[str]:
+        has_default = default is not None
         default = list(default or [])
         default_hint = ", ".join(str(options.index(item) + 1) for item in default if item in options)
         prompt = (
@@ -137,13 +143,17 @@ class TerminalUI:
         else:
             prompt += "e.g. 1,3,5: "
         if allow_back:
-            prompt += "(or back): "
+            prompt += "0 = back: "
+        elif allow_exit:
+            prompt += "0 = exit: "
 
         while True:
             answer = self._input(prompt).strip()
             if allow_back and is_back_command(answer):
                 raise PromptBack()
-            if not answer and default:
+            if allow_exit and is_exit_command(answer):
+                raise PromptExit()
+            if not answer and has_default:
                 return list(default)
             try:
                 return parse_multi_select(answer, options)
@@ -156,6 +166,7 @@ class TerminalUI:
         options: Sequence[str],
         default: str | None = None,
         allow_back: bool = False,
+        allow_exit: bool = False,
     ) -> str:
         default_hint = str(options.index(default) + 1) if default in options else ""
         prompt = (
@@ -169,12 +180,16 @@ class TerminalUI:
         else:
             prompt += "e.g. 2: "
         if allow_back:
-            prompt += "(or back): "
+            prompt += "0 = back: "
+        elif allow_exit:
+            prompt += "0 = exit: "
 
         while True:
             answer = self._input(prompt).strip()
             if allow_back and is_back_command(answer):
                 raise PromptBack()
+            if allow_exit and is_exit_command(answer):
+                raise PromptExit()
             if not answer and default:
                 return default
             try:
@@ -190,19 +205,24 @@ class TerminalUI:
         title: str,
         default: str | None = None,
         allow_back: bool = False,
+        allow_exit: bool = False,
         validator: Callable[[str], str] | None = None,
     ) -> str:
         prompt = title
         if default:
             prompt += f" Enter = {default}"
         if allow_back:
-            prompt += " (or back)"
+            prompt += " (0 = back)"
+        elif allow_exit:
+            prompt += " (0 = exit)"
         prompt += ": "
 
         while True:
             answer = self._input(prompt).strip()
             if allow_back and is_back_command(answer):
                 raise PromptBack()
+            if allow_exit and is_exit_command(answer):
+                raise PromptExit()
             if not answer and default is not None:
                 answer = default
             if not answer:
@@ -246,8 +266,8 @@ class TerminalUI:
         grid.add_column()
         grid.add_row("Catalogs", ", ".join(summary.catalogs))
         grid.add_row("Proto", ", ".join(summary.protocols))
+        grid.add_row("Filters", summary.filter_selection)
         grid.add_row("Output", summary.output_selection)
-        grid.add_row("Filter", summary.filter_mode)
         grid.add_row("Profile", summary.profile)
         grid.add_row("Loaded", str(summary.total_loaded))
         grid.add_row("Candidates", str(summary.total_filtered))
@@ -305,8 +325,8 @@ class TerminalUI:
                 "Run Summary",
                 f"catalogs: {', '.join(summary.catalogs)}",
                 f"proto: {', '.join(summary.protocols)}",
+                f"filters: {summary.filter_selection}",
                 f"output: {summary.output_selection}",
-                f"filter: {summary.filter_mode}",
                 f"profile: {summary.profile}",
                 f"loaded: {summary.total_loaded}",
                 f"candidates: {summary.total_filtered}",
@@ -360,7 +380,11 @@ def parse_multi_select(answer: str, options: Sequence[str]) -> list[str]:
 
 
 def is_back_command(answer: str) -> bool:
-    return answer.strip().lower() in {"back", "b"}
+    return answer.strip() == "0"
+
+
+def is_exit_command(answer: str) -> bool:
+    return answer.strip() == "0"
 
 
 def render_plain_table(results: list[MeasurementResult], stamp_mode: str) -> str:
