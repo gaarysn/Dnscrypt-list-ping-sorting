@@ -25,7 +25,17 @@ from dnscrypt_sorter.cli import (
 )
 from dnscrypt_sorter.filters import ResolverFilterCriteria
 from dnscrypt_sorter.models import GeoLocation, MeasurementResult, Resolver
-from dnscrypt_sorter.ui import RunSummary, compact_stamp, is_back_command, is_exit_command, parse_multi_select
+from dnscrypt_sorter.ui import (
+    RunSummary,
+    compact_stamp,
+    format_country,
+    is_back_command,
+    is_exit_command,
+    parse_multi_select,
+    render_plain_table,
+    resolve_effective_stamp_mode,
+    resolve_result_columns,
+)
 
 
 def make_result() -> MeasurementResult:
@@ -83,6 +93,65 @@ class CliHelpersTests(unittest.TestCase):
         self.assertTrue(compact.startswith("sdns://A"))
         self.assertTrue(compact.endswith("456789"))
         self.assertIn("...", compact)
+
+    def test_effective_stamp_mode_hides_stamp_on_narrow_width(self) -> None:
+        self.assertEqual(resolve_effective_stamp_mode(120, "compact"), "hidden")
+        self.assertEqual(resolve_effective_stamp_mode(120, "full"), "hidden")
+        self.assertEqual(resolve_effective_stamp_mode(160, "compact"), "compact")
+
+    def test_format_country_compacts_long_values(self) -> None:
+        country = format_country("Completely free and family friendly", 100)
+        self.assertLessEqual(len(country), 12)
+        self.assertTrue(country.endswith("…"))
+
+    def test_result_columns_change_with_terminal_width(self) -> None:
+        narrow = resolve_result_columns(70, "compact")
+        medium = resolve_result_columns(120, "compact")
+        wide = resolve_result_columns(170, "compact")
+
+        self.assertEqual(narrow, ("#", "name", "latency_ms", "rel_%"))
+        self.assertIn("country", medium)
+        self.assertNotIn("stamp", medium)
+        self.assertIn("stamp", wide)
+        self.assertGreater(len(wide), len(medium))
+
+    def test_render_plain_table_uses_adaptive_columns(self) -> None:
+        resolver = make_result().resolver
+        long_country_result = MeasurementResult(
+            resolver=Resolver(
+                catalog=resolver.catalog,
+                name=resolver.name,
+                proto=resolver.proto,
+                stamp="sdns://ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                country="Completely free and family friendly",
+                description=resolver.description,
+                dnssec=resolver.dnssec,
+                nofilter=resolver.nofilter,
+                nolog=resolver.nolog,
+                ipv6=resolver.ipv6,
+                addrs=resolver.addrs,
+                ports=resolver.ports,
+                location=resolver.location,
+            ),
+            address="51.158.147.132",
+            port=443,
+            latency_seconds=0.05,
+            stderr_seconds=0.005,
+            reliability=1.0,
+            successful_attempts=3,
+            attempted_probes=3,
+        )
+
+        narrow = render_plain_table([long_country_result], stamp_mode="compact", terminal_width=70)
+        medium = render_plain_table([long_country_result], stamp_mode="compact", terminal_width=120)
+        wide = render_plain_table([long_country_result], stamp_mode="compact", terminal_width=170)
+
+        self.assertNotIn("stamp", narrow.splitlines()[0])
+        self.assertNotIn("country", narrow.splitlines()[0])
+        self.assertIn("country", medium.splitlines()[0])
+        self.assertIn("Completely …", medium)
+        self.assertIn("stamp", wide.splitlines()[0])
+        self.assertIn("sdns://ABCDEFGHIJKLM", wide)
 
     def test_expand_protocols_supports_all_alias(self) -> None:
         self.assertIn("DNSCrypt", expand_protocols(None))

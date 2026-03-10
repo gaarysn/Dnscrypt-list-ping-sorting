@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
+import shutil
 import signal
 import sys
 from typing import Callable, Iterable, Sequence
@@ -58,6 +59,18 @@ class RunSummary:
     expected_attempts: int
 
 
+@dataclass(frozen=True, slots=True)
+class ResultColumn:
+    key: str
+    header: str
+    min_width: int
+    justify: str = "left"
+    no_wrap: bool = False
+    overflow: str = "fold"
+    max_width: int | None = None
+    style: str = "white"
+
+
 class ProbeMonitor:
     def __init__(self, enabled: bool, total: int, expected_attempts: int) -> None:
         self.enabled = enabled and RICH_AVAILABLE
@@ -109,6 +122,40 @@ class ProbeMonitor:
             self.progress.advance(self.completed_task, 1)
             details = f"ok={self.success} fail={self.failed} attempts={self.expected_attempts}"
             self.progress.update(self.completed_task, details=details)
+
+
+RESULT_COLUMNS: dict[str, ResultColumn] = {
+    "#": ResultColumn("#", "#", min_width=4, justify="right", no_wrap=True, style="bold yellow"),
+    "name": ResultColumn("name", "name", min_width=16, overflow="fold", style="white"),
+    "catalog": ResultColumn("catalog", "catalog", min_width=18, no_wrap=True, style="dim cyan"),
+    "proto": ResultColumn("proto", "proto", min_width=12, no_wrap=True, style="bright_magenta"),
+    "country": ResultColumn("country", "country", min_width=14, no_wrap=True, style="green"),
+    "address": ResultColumn("address", "address", min_width=18, overflow="fold", style="white"),
+    "port": ResultColumn("port", "port", min_width=6, justify="right", no_wrap=True, style="dim"),
+    "latency_ms": ResultColumn(
+        "latency_ms",
+        "latency_ms",
+        min_width=12,
+        justify="right",
+        no_wrap=True,
+        style="bold bright_green",
+    ),
+    "stderr_ms": ResultColumn(
+        "stderr_ms",
+        "stderr_ms",
+        min_width=11,
+        justify="right",
+        no_wrap=True,
+        style="dim green",
+    ),
+    "rel_%": ResultColumn("rel_%", "rel_%", min_width=8, justify="right", no_wrap=True, style="bright_cyan"),
+    "stamp": ResultColumn("stamp", "stamp", min_width=26, overflow="fold", style="dim"),
+}
+
+MANDATORY_RESULT_COLUMNS = ("#", "name", "latency_ms", "rel_%")
+OPTIONAL_RESULT_COLUMNS = ("proto", "catalog", "country", "address", "port", "stderr_ms", "stamp")
+STAMP_MIN_WIDTH = 145
+DEFAULT_TERMINAL_WIDTH = 120
 
 
 class PromptBack(Exception):
@@ -321,15 +368,21 @@ class TerminalUI:
         stamp_mode: str,
     ) -> None:
         if self.use_rich:
+            width = self.stdout_console.size.width
+            effective_stamp_mode = resolve_effective_stamp_mode(width, stamp_mode)
             self.stdout_console.print(self._build_summary_panel(summary))
-            self.stdout_console.print(self._build_results_table(results, stamp_mode=stamp_mode))
-            if stamp_mode == "full":
+            self.stdout_console.print(
+                self._build_results_table(results, stamp_mode=effective_stamp_mode, terminal_width=width),
+            )
+            if effective_stamp_mode == "full":
                 self.stdout_console.print(self._build_full_stamp_table(results))
             return
 
         print(self._build_plain_summary(summary))
-        print(render_plain_table(results, stamp_mode=stamp_mode))
-        if stamp_mode == "full":
+        width = detect_terminal_width()
+        effective_stamp_mode = resolve_effective_stamp_mode(width, stamp_mode)
+        print(render_plain_table(results, stamp_mode=effective_stamp_mode, terminal_width=width))
+        if effective_stamp_mode == "full":
             print(render_plain_full_stamps(results))
 
     def _render_select_prompt(
@@ -425,37 +478,26 @@ class TerminalUI:
         grid.add_row("Expected probes", str(summary.expected_attempts))
         return Panel(grid, title="[bold bright_cyan]Run Summary[/bold bright_cyan]", box=box.ROUNDED, border_style="bright_blue")
 
-    def _build_results_table(self, results: list[MeasurementResult], stamp_mode: str):
+    def _build_results_table(self, results: list[MeasurementResult], stamp_mode: str, terminal_width: int):
+        columns = resolve_result_columns(terminal_width, stamp_mode)
         table = Table(box=box.SIMPLE_HEAVY, expand=True, show_lines=False, header_style="bold yellow")
-        table.add_column("#", justify="right", no_wrap=True, style="bold yellow")
-        table.add_column("name", overflow="fold", style="white")
-        table.add_column("catalog", no_wrap=True, style="dim cyan")
-        table.add_column("proto", no_wrap=True, style="bright_magenta")
-        table.add_column("country", no_wrap=True, style="green")
-        table.add_column("address", overflow="fold", style="white")
-        table.add_column("port", justify="right", no_wrap=True, style="dim")
-        table.add_column("latency_ms", justify="right", no_wrap=True, style="bold bright_green")
-        table.add_column("stderr_ms", justify="right", no_wrap=True, style="dim green")
-        table.add_column("rel_%", justify="right", no_wrap=True, style="bright_cyan")
-        if stamp_mode != "hidden":
-            max_width = 24 if stamp_mode == "compact" else 48
-            table.add_column("stamp", overflow="fold", max_width=max_width, style="dim")
+        for key in columns:
+            column = RESULT_COLUMNS[key]
+            max_width = resolve_column_max_width(key, terminal_width, stamp_mode)
+            table.add_column(
+                column.header,
+                justify=column.justify,
+                no_wrap=column.no_wrap,
+                overflow=column.overflow,
+                max_width=max_width,
+                style=column.style,
+            )
 
         for index, result in enumerate(results, start=1):
             row = [
-                str(index),
-                result.resolver.name,
-                result.resolver.catalog,
-                result.resolver.proto,
-                result.resolver.country or "-",
-                result.address,
-                str(result.port or "-"),
-                f"{result.latency_ms:.2f}",
-                f"{result.stderr_ms:.2f}",
-                f"{result.reliability_percent:.1f}",
+                format_result_cell(result, key, index=index, stamp_mode=stamp_mode, terminal_width=terminal_width)
+                for key in columns
             ]
-            if stamp_mode != "hidden":
-                row.append(compact_stamp(result.resolver.stamp) if stamp_mode == "compact" else result.resolver.stamp)
             table.add_row(*row)
         return table
 
@@ -503,6 +545,106 @@ def compact_stamp(stamp: str, prefix: int = 20, suffix: int = 10) -> str:
     return f"{stamp[:prefix]}...{stamp[-suffix:]}"
 
 
+def compact_text(value: str, max_length: int) -> str:
+    if max_length <= 1:
+        return value[:max_length]
+    if len(value) <= max_length:
+        return value
+    return f"{value[:max_length - 1]}…"
+
+
+def detect_terminal_width(default: int = DEFAULT_TERMINAL_WIDTH) -> int:
+    return shutil.get_terminal_size((default, 20)).columns
+
+
+def resolve_effective_stamp_mode(terminal_width: int, stamp_mode: str) -> str:
+    if stamp_mode == "hidden":
+        return "hidden"
+    if terminal_width < STAMP_MIN_WIDTH:
+        return "hidden"
+    return stamp_mode
+
+
+def resolve_country_max_length(terminal_width: int) -> int:
+    if terminal_width < 90:
+        return 10
+    if terminal_width < 130:
+        return 12
+    if terminal_width < 150:
+        return 16
+    return 20
+
+
+def resolve_column_max_width(column_key: str, terminal_width: int, stamp_mode: str) -> int | None:
+    if column_key == "country":
+        return resolve_country_max_length(terminal_width)
+    if column_key == "stamp":
+        return 24 if stamp_mode == "compact" else 48
+    return RESULT_COLUMNS[column_key].max_width
+
+
+def resolve_result_columns(terminal_width: int, stamp_mode: str) -> tuple[str, ...]:
+    effective_stamp_mode = resolve_effective_stamp_mode(terminal_width, stamp_mode)
+    if terminal_width < 80:
+        return MANDATORY_RESULT_COLUMNS
+
+    columns = list(MANDATORY_RESULT_COLUMNS)
+    if terminal_width >= 80:
+        columns.append("proto")
+    if terminal_width >= 96:
+        columns.append("catalog")
+    if terminal_width >= 108:
+        columns.append("country")
+    if terminal_width >= 124:
+        columns.append("address")
+    if terminal_width >= 136:
+        columns.append("port")
+    if terminal_width >= 148:
+        columns.append("stderr_ms")
+    if effective_stamp_mode != "hidden":
+        columns.append("stamp")
+
+    return tuple(columns)
+
+
+def format_country(country: str, terminal_width: int) -> str:
+    value = country or "-"
+    return compact_text(value, resolve_country_max_length(terminal_width))
+
+
+def format_result_cell(
+    result: MeasurementResult,
+    column_key: str,
+    *,
+    index: int,
+    stamp_mode: str,
+    terminal_width: int,
+) -> str:
+    if column_key == "#":
+        return str(index)
+    if column_key == "name":
+        return result.resolver.name
+    if column_key == "catalog":
+        return result.resolver.catalog
+    if column_key == "proto":
+        return result.resolver.proto
+    if column_key == "country":
+        return format_country(result.resolver.country, terminal_width)
+    if column_key == "address":
+        return result.address
+    if column_key == "port":
+        return str(result.port or "-")
+    if column_key == "latency_ms":
+        return f"{result.latency_ms:.2f}"
+    if column_key == "stderr_ms":
+        return f"{result.stderr_ms:.2f}"
+    if column_key == "rel_%":
+        return f"{result.reliability_percent:.1f}"
+    if column_key == "stamp":
+        return compact_stamp(result.resolver.stamp) if stamp_mode == "compact" else result.resolver.stamp
+    raise KeyError(f"Unknown result column: {column_key}")
+
+
 def parse_multi_select(answer: str, options: Sequence[str]) -> list[str]:
     if not answer:
         raise ValueError("Select at least one option.")
@@ -536,27 +678,22 @@ def is_exit_command(answer: str) -> bool:
     return answer.strip() == "0"
 
 
-def render_plain_table(results: list[MeasurementResult], stamp_mode: str) -> str:
-    headers = ["#", "name", "catalog", "proto", "country", "address", "port", "latency_ms", "stderr_ms", "rel_%"]
-    if stamp_mode != "hidden":
-        headers.append("stamp")
+def render_plain_table(
+    results: list[MeasurementResult],
+    stamp_mode: str,
+    terminal_width: int | None = None,
+) -> str:
+    width = terminal_width or 10_000
+    effective_stamp_mode = resolve_effective_stamp_mode(width, stamp_mode)
+    columns = resolve_result_columns(width, effective_stamp_mode)
+    headers = [RESULT_COLUMNS[key].header for key in columns]
 
     rows = []
     for index, result in enumerate(results, start=1):
         row = [
-            str(index),
-            result.resolver.name,
-            result.resolver.catalog,
-            result.resolver.proto,
-            result.resolver.country or "-",
-            result.address,
-            str(result.port or "-"),
-            f"{result.latency_ms:.2f}",
-            f"{result.stderr_ms:.2f}",
-            f"{result.reliability_percent:.1f}",
+            format_result_cell(result, key, index=index, stamp_mode=effective_stamp_mode, terminal_width=width)
+            for key in columns
         ]
-        if stamp_mode != "hidden":
-            row.append(compact_stamp(result.resolver.stamp) if stamp_mode == "compact" else result.resolver.stamp)
         rows.append(row)
 
     widths = [len(header) for header in headers]
