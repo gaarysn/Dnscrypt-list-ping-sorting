@@ -361,9 +361,7 @@ def run_interactive_wizard(args: argparse.Namespace, ui: TerminalUI) -> int:
                     if "I don't know (continue without extra filters)" in selected_filters:
                         selected_filters = set()
 
-                    state.require_nofilter = "Require nofilter" in selected_filters
-                    state.require_nolog = "Require nolog" in selected_filters
-                    state.require_dnssec = "Require DNSSEC" in selected_filters
+                    apply_filter_presets(state, selected_filters)
                     if "Filter by country" not in selected_filters:
                         state.countries = ()
 
@@ -669,9 +667,8 @@ def criteria_from_state(state: InteractiveWizardState) -> ResolverFilterCriteria
 
 FILTER_OPTIONS = (
     "I don't know (continue without extra filters)",
-    "Require nofilter",
-    "Require nolog",
-    "Require DNSSEC",
+    "Require nofilter, Require nolog",
+    "Require nofilter, Require nolog, Require DNSSEC",
     "Filter by country",
 )
 
@@ -690,15 +687,29 @@ IP_VERSION_VALUES = {
 
 def selected_filter_options(state: InteractiveWizardState) -> tuple[str, ...]:
     selected: list[str] = []
-    if state.require_nofilter:
-        selected.append("Require nofilter")
-    if state.require_nolog:
-        selected.append("Require nolog")
-    if state.require_dnssec:
-        selected.append("Require DNSSEC")
+    if state.require_nofilter and state.require_nolog and state.require_dnssec:
+        selected.append("Require nofilter, Require nolog, Require DNSSEC")
+    elif state.require_nofilter and state.require_nolog:
+        selected.append("Require nofilter, Require nolog")
     if state.countries:
         selected.append("Filter by country")
     return tuple(selected)
+
+
+def apply_filter_presets(state: InteractiveWizardState, selected_filters: set[str]) -> None:
+    state.require_nofilter = False
+    state.require_nolog = False
+    state.require_dnssec = False
+
+    if "Require nofilter, Require nolog, Require DNSSEC" in selected_filters:
+        state.require_nofilter = True
+        state.require_nolog = True
+        state.require_dnssec = True
+        return
+
+    if "Require nofilter, Require nolog" in selected_filters:
+        state.require_nofilter = True
+        state.require_nolog = True
 
 
 def ip_version_label(value: str) -> str:

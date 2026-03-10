@@ -6,7 +6,9 @@ from pathlib import Path
 
 from dnscrypt_sorter.cli import (
     PROBE_PROFILES,
+    InteractiveWizardState,
     RunArtifacts,
+    apply_filter_presets,
     build_default_export_name,
     build_text_export,
     describe_output_selection,
@@ -19,6 +21,7 @@ from dnscrypt_sorter.cli import (
     resolve_output_count,
     resolve_probe_options,
     save_results,
+    selected_filter_options,
     should_prompt_for_selection,
     validate_country_list,
     validate_positive_int,
@@ -224,6 +227,30 @@ class CliHelpersTests(unittest.TestCase):
         self.assertTrue(criteria.require_dnssec)
         self.assertEqual(criteria.ip_version, "ipv4")
         self.assertEqual(criteria.countries, ("Germany", "France"))
+
+    def test_selected_filter_options_uses_presets(self) -> None:
+        state = InteractiveWizardState(
+            require_nofilter=True,
+            require_nolog=True,
+            require_dnssec=True,
+            countries=("Germany",),
+        )
+        self.assertEqual(
+            selected_filter_options(state),
+            ("Require nofilter, Require nolog, Require DNSSEC", "Filter by country"),
+        )
+
+    def test_apply_filter_presets_sets_expected_flags(self) -> None:
+        state = InteractiveWizardState()
+        apply_filter_presets(state, {"Require nofilter, Require nolog"})
+        self.assertTrue(state.require_nofilter)
+        self.assertTrue(state.require_nolog)
+        self.assertFalse(state.require_dnssec)
+
+        apply_filter_presets(state, {"Require nofilter, Require nolog, Require DNSSEC"})
+        self.assertTrue(state.require_nofilter)
+        self.assertTrue(state.require_nolog)
+        self.assertTrue(state.require_dnssec)
 
     def test_save_results_supports_txt_json_and_csv(self) -> None:
         result = make_result()
