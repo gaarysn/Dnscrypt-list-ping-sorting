@@ -1,3 +1,12 @@
+Metadata-Version: 2.4
+Name: dnscrypt-list-ping-sorting
+Version: 0.2.0
+Summary: Rank measurable DNS resolvers from official DNSCrypt catalogs by latency
+Author: Magalame
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: rich>=13.7.0
+
 # Dnscrypt-list-ping-sorting
 
 A program to ping and sort the DNS servers proposed by DNSCrypt ([dnscrypt.info](https://dnscrypt.info/)).
@@ -28,7 +37,6 @@ There you can choose multiple catalogs and multiple protocols to test. The inter
 
 - choose optional filters such as `nofilter`, `nolog`, `DNSSEC`, IP version, and countries, or use the built-in `I don't know` option
 - choose whether to show `top N` or all results
-- check your current IP information from the main menu
 - save the final result as `txt`, `json` or `csv` with an auto-generated name based on date and selected categories
 - go back to the previous step with `0`
 - return to the main menu after results
@@ -92,7 +100,7 @@ Terminal output now includes:
 
 Progress is written to `stderr`, so machine-readable output can still be redirected safely from `stdout`.
 
-During interactive mode you can press `Ctrl+C` on any screen to return to the main menu. Press `Ctrl+C` again in the main menu to exit the program.
+During interactive latency checks you can press `Ctrl+C` to stop the current run and return to the main menu.
 
 ## Usage
 
@@ -131,13 +139,12 @@ Useful options:
 
 The default interactive flow is now:
 
-1. choose `Start new check` or `Check IP` in the main menu
-2. choose one or more catalogs
-3. choose one or more protocols
-4. choose optional filters
-5. choose result size: `top N` or `all`
-6. run checks
-7. save results or return to the main menu
+1. choose one or more catalogs
+2. choose one or more protocols
+3. choose optional filters
+4. choose result size: `top N` or `all`
+5. run checks
+6. save results or return to the main menu
 
 At every wizard step after the first one you can type `0` to return to the previous menu. In the main menu and on the first catalog step, `0` exits the program.
 

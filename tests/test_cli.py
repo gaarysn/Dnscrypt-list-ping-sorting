@@ -11,6 +11,8 @@ from dnscrypt_sorter.cli import (
     build_text_export,
     describe_output_selection,
     expand_protocols,
+    interrupt_hint,
+    main_menu_options,
     normalize_country_filters,
     no_matches_message,
     resolve_filter_criteria,
@@ -88,6 +90,13 @@ class CliHelpersTests(unittest.TestCase):
         expanded = expand_protocols(["all"])
         self.assertIn("DNSCrypt", expanded)
         self.assertIn("ODoH relay", expanded)
+
+    def test_main_menu_contains_ip_check(self) -> None:
+        self.assertEqual(main_menu_options(), ("Start new check", "Check IP"))
+
+    def test_interrupt_hint_varies_by_screen(self) -> None:
+        self.assertIn("exit", interrupt_hint(in_main_menu=True).lower())
+        self.assertIn("main menu", interrupt_hint(in_main_menu=False).lower())
 
     def test_normalize_country_filters_supports_repeated_and_comma_values(self) -> None:
         countries = normalize_country_filters(["Germany, France", "Germany", "Canada"])
@@ -198,9 +207,10 @@ class CliHelpersTests(unittest.TestCase):
         )
 
         name = build_default_export_name(artifacts, "csv", date_prefix="20260310")
-        self.assertEqual(
-            name,
+        self.assertTrue(name.startswith("dnscrypt-results"))
+        self.assertIn(
             "20260310-catalogs-public-resolvers-relays-protos-dnscrypt-doh-filters-nofilter-nolog-ipv4-countries-germany.csv",
+            name,
         )
 
     def test_build_text_export_contains_output_selection(self) -> None:

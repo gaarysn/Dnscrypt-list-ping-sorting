@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
+import signal
 import sys
 from typing import Callable, Iterable, Sequence
 
@@ -19,13 +21,26 @@ try:
         TextColumn,
         TimeElapsedColumn,
     )
+    from rich.rule import Rule
     from rich.table import Table
+    from rich.text import Text
 
     RICH_AVAILABLE = True
 except ImportError:
     Console = None
     Progress = None
     RICH_AVAILABLE = False
+
+BANNER = r"""
+ ____  _   _ ____                       _     ____             _
+|  _ \| \ | / ___|  ___ _ __ _   _ _ __ | |_  / ___|  ___  _ __| |_ ___ _ __
+| | | |  \| \___ \ / __| '__| | | | '_ \| __| \___ \ / _ \| '__| __/ _ \ '__|
+| |_| | |\  |___) | (__| |  | |_| | |_) | |_   ___) | (_) | |  | ||  __/ |
+|____/|_| \_|____/ \___|_|   \__, | .__/ \__| |____/ \___/|_|   \__\___|_|
+                              |___/|_|
+"""
+
+WIZARD_STEPS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +123,56 @@ class TerminalUI:
         self.use_rich = enable_rich and RICH_AVAILABLE
         self.stderr_console = Console(file=sys.stderr, highlight=False) if self.use_rich else None
         self.stdout_console = Console(highlight=False) if self.use_rich else None
+        self._header_fn: Callable[[], None] | None = None
+        self._prompt_fn: Callable[[], None] | None = None
+        if self.use_rich and hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, self._on_terminal_resize)
+
+    def _on_terminal_resize(self, signum: int, frame: object) -> None:
+        if self._prompt_fn is not None:
+            self.clear_screen()
+            if self._header_fn:
+                self._header_fn()
+            self._prompt_fn()
+            if self.stderr_console:
+                self.stderr_console.print("  [bold green]>[/bold green] ", end="")
+
+    def set_header(self, fn: Callable[[], None] | None) -> None:
+        self._header_fn = fn
+
+    def clear_screen(self) -> None:
+        if self.use_rich:
+            self.stderr_console.clear()
+        else:
+            print("\033[2J\033[H", file=sys.stderr, end="", flush=True)
+
+    def print_banner(self) -> None:
+        if self.use_rich:
+            width = self.stderr_console.size.width
+            if width >= 80:
+                content = Text(BANNER.rstrip("\n"), style="bold bright_cyan")
+            else:
+                content = Text("DNSCrypt Sorter", style="bold bright_cyan", justify="center")
+            panel = Panel(
+                content,
+                box=box.DOUBLE,
+                border_style="bright_blue",
+                subtitle="[dim white]Measure and rank DNS resolvers by latency[/dim white]",
+                padding=(0, 2),
+            )
+            self.stderr_console.print(panel)
+        else:
+            print(BANNER, file=sys.stderr)
+
+    def print_step_header(self, step: int, total: int = WIZARD_STEPS) -> None:
+        if self.use_rich:
+            self.stderr_console.print()
+            self.stderr_console.print(
+                f"  [bold magenta]Step {step} of {total}[/bold magenta]",
+            )
+            self.stderr_console.print()
+        else:
+            print(f"\n  Step {step} of {total}\n", file=sys.stderr)
 
     @contextmanager
     def status(self, message: str):
@@ -132,33 +197,34 @@ class TerminalUI:
         has_default = default is not None
         default = list(default or [])
         default_hint = ", ".join(str(options.index(item) + 1) for item in default if item in options)
-        prompt = (
-            f"{title}\n"
-            + "\n".join(f"  {index}. {option}" for index, option in enumerate(options, start=1))
-            + "\n"
-            + "Enter numbers separated by commas. "
-        )
-        if default_hint:
-            prompt += f"Enter = {default_hint}: "
-        else:
-            prompt += "e.g. 1,3,5: "
-        if allow_back:
-            prompt += "0 = back: "
-        elif allow_exit:
-            prompt += "0 = exit: "
 
-        while True:
-            answer = self._input(prompt).strip()
-            if allow_back and is_back_command(answer):
-                raise PromptBack()
-            if allow_exit and is_exit_command(answer):
-                raise PromptExit()
-            if not answer and has_default:
-                return list(default)
-            try:
-                return parse_multi_select(answer, options)
-            except ValueError as exc:
-                self._print_error(str(exc))
+        self._prompt_fn = lambda: self._render_select_prompt(
+            title=title, options=options, default_hint=default_hint,
+            allow_back=allow_back, allow_exit=allow_exit, multi=True,
+        )
+        try:
+            while True:
+                self._render_select_prompt(
+                    title=title,
+                    options=options,
+                    default_hint=default_hint,
+                    allow_back=allow_back,
+                    allow_exit=allow_exit,
+                    multi=True,
+                )
+                answer = self._styled_input().strip()
+                if allow_back and is_back_command(answer):
+                    raise PromptBack()
+                if allow_exit and is_exit_command(answer):
+                    raise PromptExit()
+                if not answer and has_default:
+                    return list(default)
+                try:
+                    return parse_multi_select(answer, options)
+                except ValueError as exc:
+                    self._print_error(str(exc))
+        finally:
+            self._prompt_fn = None
 
     def prompt_single_select(
         self,
@@ -169,36 +235,37 @@ class TerminalUI:
         allow_exit: bool = False,
     ) -> str:
         default_hint = str(options.index(default) + 1) if default in options else ""
-        prompt = (
-            f"{title}\n"
-            + "\n".join(f"  {index}. {option}" for index, option in enumerate(options, start=1))
-            + "\n"
-            + "Enter option number. "
-        )
-        if default_hint:
-            prompt += f"Enter = {default_hint}: "
-        else:
-            prompt += "e.g. 2: "
-        if allow_back:
-            prompt += "0 = back: "
-        elif allow_exit:
-            prompt += "0 = exit: "
 
-        while True:
-            answer = self._input(prompt).strip()
-            if allow_back and is_back_command(answer):
-                raise PromptBack()
-            if allow_exit and is_exit_command(answer):
-                raise PromptExit()
-            if not answer and default:
-                return default
-            try:
-                values = parse_multi_select(answer, options)
-                if len(values) != 1:
-                    raise ValueError("Select exactly one option.")
-                return values[0]
-            except ValueError as exc:
-                self._print_error(str(exc))
+        self._prompt_fn = lambda: self._render_select_prompt(
+            title=title, options=options, default_hint=default_hint,
+            allow_back=allow_back, allow_exit=allow_exit, multi=False,
+        )
+        try:
+            while True:
+                self._render_select_prompt(
+                    title=title,
+                    options=options,
+                    default_hint=default_hint,
+                    allow_back=allow_back,
+                    allow_exit=allow_exit,
+                    multi=False,
+                )
+                answer = self._styled_input().strip()
+                if allow_back and is_back_command(answer):
+                    raise PromptBack()
+                if allow_exit and is_exit_command(answer):
+                    raise PromptExit()
+                if not answer and default:
+                    return default
+                try:
+                    values = parse_multi_select(answer, options)
+                    if len(values) != 1:
+                        raise ValueError("Select exactly one option.")
+                    return values[0]
+                except ValueError as exc:
+                    self._print_error(str(exc))
+        finally:
+            self._prompt_fn = None
 
     def prompt_text(
         self,
@@ -208,37 +275,41 @@ class TerminalUI:
         allow_exit: bool = False,
         validator: Callable[[str], str] | None = None,
     ) -> str:
-        prompt = title
-        if default:
-            prompt += f" Enter = {default}"
-        if allow_back:
-            prompt += " (0 = back)"
-        elif allow_exit:
-            prompt += " (0 = exit)"
-        prompt += ": "
-
-        while True:
-            answer = self._input(prompt).strip()
-            if allow_back and is_back_command(answer):
-                raise PromptBack()
-            if allow_exit and is_exit_command(answer):
-                raise PromptExit()
-            if not answer and default is not None:
-                answer = default
-            if not answer:
-                self._print_error("Value cannot be empty.")
-                continue
-            if validator is not None:
-                try:
-                    return validator(answer)
-                except ValueError as exc:
-                    self._print_error(str(exc))
+        self._prompt_fn = lambda: self._render_text_prompt(
+            title=title, default=default,
+            allow_back=allow_back, allow_exit=allow_exit,
+        )
+        try:
+            while True:
+                self._render_text_prompt(
+                    title=title,
+                    default=default,
+                    allow_back=allow_back,
+                    allow_exit=allow_exit,
+                )
+                answer = self._styled_input().strip()
+                if allow_back and is_back_command(answer):
+                    raise PromptBack()
+                if allow_exit and is_exit_command(answer):
+                    raise PromptExit()
+                if not answer and default is not None:
+                    answer = default
+                if not answer:
+                    self._print_error("Value cannot be empty.")
                     continue
-            return answer
+                if validator is not None:
+                    try:
+                        return validator(answer)
+                    except ValueError as exc:
+                        self._print_error(str(exc))
+                        continue
+                return answer
+        finally:
+            self._prompt_fn = None
 
     def print_message(self, message: str, style: str | None = None) -> None:
         if self.use_rich and style:
-            self.stderr_console.print(f"[{style}]{message}[/{style}]")
+            self.stderr_console.print(f"  [{style}]{message}[/{style}]")
         else:
             print(message, file=sys.stderr)
 
@@ -260,6 +331,83 @@ class TerminalUI:
         if stamp_mode == "full":
             print(render_plain_full_stamps(results))
 
+    def _render_select_prompt(
+        self,
+        title: str,
+        options: Sequence[str],
+        default_hint: str,
+        allow_back: bool,
+        allow_exit: bool,
+        multi: bool,
+    ) -> None:
+        if not self.use_rich:
+            return
+
+        con = self.stderr_console
+        con.print()
+        con.print(Rule(title, style="bold cyan"))
+        con.print()
+
+        options_lines = Text()
+        for index, option in enumerate(options, start=1):
+            options_lines.append(f"    {index}", style="bold yellow")
+            options_lines.append(". ", style="yellow")
+            options_lines.append(option, style="white")
+            if index < len(options):
+                options_lines.append("\n")
+
+        con.print(Panel(
+            options_lines,
+            box=box.ROUNDED,
+            border_style="bright_blue",
+            padding=(1, 4),
+        ))
+        con.print()
+
+        hint_parts: list[str] = []
+        if multi:
+            hint_parts.append("[dim]Comma-separated numbers, e.g. 1,3,5[/dim]")
+        else:
+            hint_parts.append("[dim]Enter option number[/dim]")
+        if default_hint:
+            hint_parts.append(f"[dim cyan]Enter = {default_hint}[/dim cyan]")
+        if allow_back:
+            hint_parts.append("[dim italic]0 = back[/dim italic]")
+        elif allow_exit:
+            hint_parts.append("[dim italic]0 = exit[/dim italic]")
+
+        con.print("  " + "    ".join(hint_parts))
+
+    def _render_text_prompt(
+        self,
+        title: str,
+        default: str | None,
+        allow_back: bool,
+        allow_exit: bool,
+    ) -> None:
+        if not self.use_rich:
+            return
+
+        con = self.stderr_console
+        con.print()
+        con.print(Rule(title, style="bold cyan"))
+        con.print()
+
+        hint_parts: list[str] = []
+        if default:
+            hint_parts.append(f"[dim cyan]Enter = {default}[/dim cyan]")
+        if allow_back:
+            hint_parts.append("[dim italic]0 = back[/dim italic]")
+        elif allow_exit:
+            hint_parts.append("[dim italic]0 = exit[/dim italic]")
+        if hint_parts:
+            con.print("  " + "    ".join(hint_parts))
+
+    def _styled_input(self) -> str:
+        if self.use_rich:
+            return self.stderr_console.input("  [bold green]>[/bold green] ")
+        return input("> ")
+
     def _build_summary_panel(self, summary: RunSummary):
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan")
@@ -274,23 +422,23 @@ class TerminalUI:
         grid.add_row("Responded", str(summary.total_responded))
         grid.add_row("Displayed", str(summary.total_displayed))
         grid.add_row("Expected probes", str(summary.expected_attempts))
-        return Panel(grid, title="Run Summary", box=box.ROUNDED)
+        return Panel(grid, title="[bold bright_cyan]Run Summary[/bold bright_cyan]", box=box.ROUNDED, border_style="bright_blue")
 
     def _build_results_table(self, results: list[MeasurementResult], stamp_mode: str):
-        table = Table(box=box.SIMPLE_HEAVY, expand=True, show_lines=False)
-        table.add_column("#", justify="right", no_wrap=True)
-        table.add_column("name", overflow="fold")
-        table.add_column("catalog", no_wrap=True)
-        table.add_column("proto", no_wrap=True)
-        table.add_column("country", no_wrap=True)
-        table.add_column("address", overflow="fold")
-        table.add_column("port", justify="right", no_wrap=True)
-        table.add_column("latency_ms", justify="right", no_wrap=True)
-        table.add_column("stderr_ms", justify="right", no_wrap=True)
-        table.add_column("rel_%", justify="right", no_wrap=True)
+        table = Table(box=box.SIMPLE_HEAVY, expand=True, show_lines=False, header_style="bold yellow")
+        table.add_column("#", justify="right", no_wrap=True, style="bold yellow")
+        table.add_column("name", overflow="fold", style="white")
+        table.add_column("catalog", no_wrap=True, style="dim cyan")
+        table.add_column("proto", no_wrap=True, style="bright_magenta")
+        table.add_column("country", no_wrap=True, style="green")
+        table.add_column("address", overflow="fold", style="white")
+        table.add_column("port", justify="right", no_wrap=True, style="dim")
+        table.add_column("latency_ms", justify="right", no_wrap=True, style="bold bright_green")
+        table.add_column("stderr_ms", justify="right", no_wrap=True, style="dim green")
+        table.add_column("rel_%", justify="right", no_wrap=True, style="bright_cyan")
         if stamp_mode != "hidden":
             max_width = 24 if stamp_mode == "compact" else 48
-            table.add_column("stamp", overflow="fold", max_width=max_width)
+            table.add_column("stamp", overflow="fold", max_width=max_width, style="dim")
 
         for index, result in enumerate(results, start=1):
             row = [
@@ -311,10 +459,10 @@ class TerminalUI:
         return table
 
     def _build_full_stamp_table(self, results: list[MeasurementResult]):
-        table = Table(title="Full stamps", box=box.SIMPLE, expand=True)
-        table.add_column("#", justify="right", no_wrap=True)
-        table.add_column("name", no_wrap=True)
-        table.add_column("stamp", overflow="fold")
+        table = Table(title="[bold bright_cyan]Full stamps[/bold bright_cyan]", box=box.SIMPLE, expand=True)
+        table.add_column("#", justify="right", no_wrap=True, style="bold yellow")
+        table.add_column("name", no_wrap=True, style="white")
+        table.add_column("stamp", overflow="fold", style="dim")
         for index, result in enumerate(results, start=1):
             table.add_row(str(index), result.resolver.name, result.resolver.stamp)
         return table
@@ -343,7 +491,7 @@ class TerminalUI:
 
     def _print_error(self, message: str) -> None:
         if self.use_rich:
-            self.stderr_console.print(f"[red]{message}[/red]")
+            self.stderr_console.print(f"  [bold red]! {message}[/bold red]")
         else:
             print(message, file=sys.stderr)
 

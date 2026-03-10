@@ -6,12 +6,15 @@ from datetime import datetime
 import json
 import os
 import re
+import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from .filters import (
     IP_VERSION_OPTIONS,
@@ -46,6 +49,15 @@ class RunCancelled(Exception):
     """Raised when the current latency run is cancelled by the user."""
 
 
+@dataclass(frozen=True, slots=True)
+class IPCheckReport:
+    hostname: str
+    local_ipv4: tuple[str, ...]
+    local_ipv6: tuple[str, ...]
+    public_ipv4: str
+    public_ipv6: str
+
+
 @dataclass(slots=True)
 class InteractiveWizardState:
     catalogs: tuple[str, ...] = ("public-resolvers",)
@@ -64,6 +76,65 @@ PROBE_PROFILES: dict[str, ProbeProfile] = {
     "balanced": ProbeProfile(attempts=5, ping_delay=0.05, server_delay=0.02, timeout=0.75, threaded_workers=12),
     "deep": ProbeProfile(attempts=8, ping_delay=0.12, server_delay=0.05, timeout=1.2, threaded_workers=6),
 }
+
+
+def main_menu_options() -> tuple[str, ...]:
+    return ("Start new check", "Check IP")
+
+
+def interrupt_hint(in_main_menu: bool) -> str:
+    if in_main_menu:
+        return "Ctrl+C = exit program."
+    return "Ctrl+C = return to main menu. Press Ctrl+C again there to exit."
+
+
+def resolve_local_ip_addresses(family: int) -> tuple[str, ...]:
+    seen: set[str] = set()
+    values: list[str] = []
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, family=family, type=socket.SOCK_STREAM)
+    except OSError:
+        return ()
+
+    for info in infos:
+        address = info[4][0]
+        if family == socket.AF_INET and address.startswith("127."):
+            continue
+        if family == socket.AF_INET6 and address == "::1":
+            continue
+        if address in seen:
+            continue
+        seen.add(address)
+        values.append(address)
+    return tuple(values)
+
+
+def fetch_public_ip(url: str, timeout: float = 3.0) -> str:
+    try:
+        with urllib_request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, KeyError, urllib_error.URLError) as exc:
+        return f"unavailable ({exc.__class__.__name__})"
+    return str(payload.get("ip", "unavailable"))
+
+
+def lookup_ip_report() -> IPCheckReport:
+    return IPCheckReport(
+        hostname=socket.gethostname(),
+        local_ipv4=resolve_local_ip_addresses(socket.AF_INET),
+        local_ipv6=resolve_local_ip_addresses(socket.AF_INET6),
+        public_ipv4=fetch_public_ip("https://api.ipify.org?format=json"),
+        public_ipv6=fetch_public_ip("https://api64.ipify.org?format=json"),
+    )
+
+
+def render_ip_report(ui: TerminalUI, report: IPCheckReport) -> None:
+    ui.print_message("IP check", style="bold cyan")
+    ui.print_message(f"Hostname: {report.hostname}", style="white")
+    ui.print_message(f"Local IPv4: {', '.join(report.local_ipv4) or 'not found'}", style="white")
+    ui.print_message(f"Local IPv6: {', '.join(report.local_ipv6) or 'not found'}", style="white")
+    ui.print_message(f"Public IPv4: {report.public_ipv4}", style="bright_green")
+    ui.print_message(f"Public IPv6: {report.public_ipv6}", style="bright_green")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,165 +240,246 @@ def main(argv: list[str] | None = None) -> int:
 def run_interactive_wizard(args: argparse.Namespace, ui: TerminalUI) -> int:
     state = InteractiveWizardState()
     step = "main_menu"
+    flash_message: str | None = None
 
-    while True:
-        if step == "main_menu":
+    def _header_main_menu() -> None:
+        ui.print_banner()
+        ui.print_message(interrupt_hint(in_main_menu=True), style="yellow")
+        if flash_message:
+            ui.print_message(flash_message, style="yellow")
+
+    def _header_step(n: int):
+        def draw() -> None:
+            ui.print_banner()
+            ui.print_step_header(n)
+            ui.print_message(interrupt_hint(in_main_menu=False), style="yellow")
+        return draw
+
+    try:
+        while True:
             try:
-                ui.prompt_single_select(
-                    "Main menu",
-                    options=("Start new check",),
-                    allow_exit=True,
-                )
-            except PromptExit:
-                return 0
-            step = "catalogs"
-            continue
+                if step == "main_menu":
+                    ui.clear_screen()
+                    _header_main_menu()
+                    ui.set_header(_header_main_menu)
+                    try:
+                        action = ui.prompt_single_select(
+                            "Main menu",
+                            options=main_menu_options(),
+                            allow_exit=True,
+                        )
+                    except PromptExit:
+                        return 0
+                    flash_message = None
+                    step = "catalogs" if action == "Start new check" else "ip_check"
+                    continue
 
-        if step == "catalogs":
-            try:
-                state.catalogs = tuple(
-                    ui.prompt_multi_select(
-                        "Select catalogs to download and test:",
-                        options=available_catalog_names(),
-                        default=state.catalogs,
-                        allow_exit=True,
-                    )
-                )
-            except PromptExit:
-                return 0
-            step = "protocols"
-            continue
+                if step == "ip_check":
+                    with ui.status("Checking IP addresses..."):
+                        report = lookup_ip_report()
 
-        if step == "protocols":
-            try:
-                state.protocols = tuple(
-                    ui.prompt_multi_select(
-                        "Select protocols to test:",
-                        options=SUPPORTED_PROTOCOLS,
-                        default=state.protocols,
-                        allow_back=True,
-                    )
-                )
-            except PromptBack:
-                step = "catalogs"
-                continue
-            step = "filters"
-            continue
+                    def _header_ip_check() -> None:
+                        ui.print_banner()
+                        render_ip_report(ui, report)
+                        ui.print_message(interrupt_hint(in_main_menu=False), style="yellow")
 
-        if step == "filters":
-            try:
-                selected_filters = set(
-                    ui.prompt_multi_select(
-                        "Select optional resolver filters, or choose 'I don't know':",
-                        options=FILTER_OPTIONS,
-                        default=selected_filter_options(state),
-                        allow_back=True,
-                    )
-                )
-            except PromptBack:
-                step = "protocols"
-                continue
+                    ui.clear_screen()
+                    _header_ip_check()
+                    ui.set_header(_header_ip_check)
+                    try:
+                        action = ui.prompt_single_select(
+                            "IP tools",
+                            options=("Refresh IP info", "Back to main menu", "Exit"),
+                            default="Refresh IP info",
+                            allow_back=True,
+                        )
+                    except PromptBack:
+                        step = "main_menu"
+                        continue
 
-            if "I don't know (continue without extra filters)" in selected_filters:
-                selected_filters = set()
+                    if action == "Refresh IP info":
+                        continue
+                    if action == "Back to main menu":
+                        step = "main_menu"
+                        continue
+                    return 0
 
-            state.require_nofilter = "Require nofilter" in selected_filters
-            state.require_nolog = "Require nolog" in selected_filters
-            state.require_dnssec = "Require DNSSEC" in selected_filters
-            if "Filter by country" not in selected_filters:
-                state.countries = ()
-
-            try:
-                ip_choice = ui.prompt_single_select(
-                    "Which IP version should be allowed?",
-                    options=IP_VERSION_LABELS,
-                    default=ip_version_label(state.ip_version),
-                    allow_back=True,
-                )
-            except PromptBack:
-                continue
-            state.ip_version = IP_VERSION_VALUES[ip_choice]
-
-            if "Filter by country" in selected_filters:
-                try:
-                    state.countries = tuple(
-                        parse_country_list(
-                            ui.prompt_text(
-                                "Enter country names separated by commas",
-                                default=", ".join(state.countries) if state.countries else None,
-                                allow_back=True,
-                                validator=validate_country_list,
+                if step == "catalogs":
+                    ui.clear_screen()
+                    header = _header_step(1)
+                    header()
+                    ui.set_header(header)
+                    try:
+                        state.catalogs = tuple(
+                            ui.prompt_multi_select(
+                                "Select catalogs to download and test",
+                                options=available_catalog_names(),
+                                default=state.catalogs,
+                                allow_exit=True,
                             )
                         )
-                    )
-                except PromptBack:
+                    except PromptExit:
+                        return 0
+                    step = "protocols"
                     continue
-            step = "output_mode"
-            continue
 
-        if step == "output_mode":
-            try:
-                output_choice = ui.prompt_single_select(
-                    "How many results to show after the check?",
-                    options=("Top N", "All results"),
-                    default="Top N" if state.output_mode == "top" else "All results",
-                    allow_back=True,
-                )
-            except PromptBack:
-                step = "filters"
-                continue
+                if step == "protocols":
+                    ui.clear_screen()
+                    header = _header_step(2)
+                    header()
+                    ui.set_header(header)
+                    try:
+                        state.protocols = tuple(
+                            ui.prompt_multi_select(
+                                "Select protocols to test",
+                                options=SUPPORTED_PROTOCOLS,
+                                default=state.protocols,
+                                allow_back=True,
+                            )
+                        )
+                    except PromptBack:
+                        step = "catalogs"
+                        continue
+                    step = "filters"
+                    continue
 
-            if output_choice == "All results":
-                state.output_mode = "all"
-                step = "run"
-                continue
+                if step == "filters":
+                    ui.clear_screen()
+                    header = _header_step(3)
+                    header()
+                    ui.set_header(header)
+                    try:
+                        selected_filters = set(
+                            ui.prompt_multi_select(
+                                "Select optional resolver filters, or choose 'I don't know'",
+                                options=FILTER_OPTIONS,
+                                default=selected_filter_options(state),
+                                allow_back=True,
+                            )
+                        )
+                    except PromptBack:
+                        step = "protocols"
+                        continue
 
-            state.output_mode = "top"
-            try:
-                state.top = int(
-                    ui.prompt_text(
-                        "Enter number of results to display",
-                        default=str(state.top),
-                        allow_back=True,
-                        validator=validate_positive_int,
-                    )
-                )
-            except PromptBack:
-                step = "output_mode"
-                continue
-            step = "run"
-            continue
+                    if "I don't know (continue without extra filters)" in selected_filters:
+                        selected_filters = set()
 
-        if step == "run":
-            ui.print_message("Press Ctrl+C during checking to stop and return to the main menu.", style="yellow")
-            try:
-                artifacts = execute_run(
-                    args=args,
-                    ui=ui,
-                    selected_catalogs=state.catalogs,
-                    selected_protocols=state.protocols,
-                    criteria=criteria_from_state(state),
-                    output_mode=state.output_mode,
-                    top=state.top,
-                )
-            except RunCancelled:
-                ui.print_message("Check cancelled. Returning to the main menu.", style="yellow")
+                    state.require_nofilter = "Require nofilter" in selected_filters
+                    state.require_nolog = "Require nolog" in selected_filters
+                    state.require_dnssec = "Require DNSSEC" in selected_filters
+                    if "Filter by country" not in selected_filters:
+                        state.countries = ()
+
+                    try:
+                        ip_choice = ui.prompt_single_select(
+                            "Which IP version should be allowed?",
+                            options=IP_VERSION_LABELS,
+                            default=ip_version_label(state.ip_version),
+                            allow_back=True,
+                        )
+                    except PromptBack:
+                        continue
+                    state.ip_version = IP_VERSION_VALUES[ip_choice]
+
+                    if "Filter by country" in selected_filters:
+                        try:
+                            state.countries = tuple(
+                                parse_country_list(
+                                    ui.prompt_text(
+                                        "Enter country names separated by commas",
+                                        default=", ".join(state.countries) if state.countries else None,
+                                        allow_back=True,
+                                        validator=validate_country_list,
+                                    )
+                                )
+                            )
+                        except PromptBack:
+                            continue
+                    step = "output_mode"
+                    continue
+
+                if step == "output_mode":
+                    ui.clear_screen()
+                    header = _header_step(4)
+                    header()
+                    ui.set_header(header)
+                    try:
+                        output_choice = ui.prompt_single_select(
+                            "How many results to show after the check?",
+                            options=("Top N", "All results"),
+                            default="Top N" if state.output_mode == "top" else "All results",
+                            allow_back=True,
+                        )
+                    except PromptBack:
+                        step = "filters"
+                        continue
+
+                    if output_choice == "All results":
+                        state.output_mode = "all"
+                        step = "run"
+                        continue
+
+                    state.output_mode = "top"
+                    try:
+                        state.top = int(
+                            ui.prompt_text(
+                                "Enter number of results to display",
+                                default=str(state.top),
+                                allow_back=True,
+                                validator=validate_positive_int,
+                            )
+                        )
+                    except PromptBack:
+                        step = "output_mode"
+                        continue
+                    step = "run"
+                    continue
+
+                if step == "run":
+                    ui.clear_screen()
+                    header = _header_step(5)
+                    header()
+                    ui.set_header(header)
+                    ui.print_message("Checking can be interrupted with Ctrl+C.", style="yellow")
+                    try:
+                        artifacts = execute_run(
+                            args=args,
+                            ui=ui,
+                            selected_catalogs=state.catalogs,
+                            selected_protocols=state.protocols,
+                            criteria=criteria_from_state(state),
+                            output_mode=state.output_mode,
+                            top=state.top,
+                        )
+                    except RunCancelled:
+                        flash_message = "Interrupted. Returned to the main menu. Press Ctrl+C there to exit."
+                        step = "main_menu"
+                        continue
+                    if artifacts is None:
+                        ui.print_message("No results from the check. Returning to filter selection.", style="yellow")
+                        step = "filters"
+                        continue
+
+                    ui.clear_screen()
+                    ui.set_header(None)
+                    ui.print_results(artifacts.displayed_results, summary=artifacts.summary, stamp_mode=args.stamp_mode)
+                    next_action = handle_results_menu(ui, artifacts, args.stamp_mode)
+                    if next_action == "main_menu":
+                        step = "main_menu"
+                        continue
+                    if next_action == "back":
+                        step = "output_mode"
+                        continue
+                    return 0
+            except KeyboardInterrupt:
+                ui.set_header(None)
+                if step == "main_menu":
+                    return 130
+                flash_message = "Interrupted. Returned to the main menu. Press Ctrl+C here again to exit."
                 step = "main_menu"
                 continue
-            if artifacts is None:
-                ui.print_message("No results from the check. Returning to filter selection.", style="yellow")
-                step = "filters"
-                continue
-
-            ui.print_results(artifacts.displayed_results, summary=artifacts.summary, stamp_mode=args.stamp_mode)
-            next_action = handle_results_menu(ui, artifacts)
-            if next_action == "main_menu":
-                step = "main_menu"
-                continue
-            if next_action == "back":
-                step = "output_mode"
-                continue
-            return 0
+    finally:
+        ui.set_header(None)
 
 
 def resolve_probe_options(args: argparse.Namespace, profile: ProbeProfile) -> ProbeOptions:
@@ -571,7 +723,12 @@ def should_prompt_for_selection(args: argparse.Namespace) -> bool:
     )
 
 
-def handle_results_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
+def handle_results_menu(ui: TerminalUI, artifacts: RunArtifacts, stamp_mode: str) -> str:
+    def redraw_results() -> None:
+        ui.print_results(artifacts.displayed_results, summary=artifacts.summary, stamp_mode=stamp_mode)
+        ui.print_message(interrupt_hint(in_main_menu=False), style="yellow")
+
+    ui.set_header(redraw_results)
     while True:
         try:
             action = ui.prompt_single_select(
@@ -584,19 +741,27 @@ def handle_results_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
             return "back"
 
         if action == "Save result":
-            outcome = handle_save_menu(ui, artifacts)
+            outcome = handle_save_menu(ui, artifacts, stamp_mode)
             if outcome in {"main_menu", "exit"}:
                 return outcome
+            ui.clear_screen()
+            redraw_results()
+            ui.set_header(redraw_results)
             continue
         if action == "Back to main menu":
             return "main_menu"
         return "exit"
 
 
-def handle_save_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
+def handle_save_menu(ui: TerminalUI, artifacts: RunArtifacts, stamp_mode: str) -> str:
     save_formats = ("txt", "json", "csv")
 
+    def redraw_results() -> None:
+        ui.print_results(artifacts.displayed_results, summary=artifacts.summary, stamp_mode=stamp_mode)
+        ui.print_message(interrupt_hint(in_main_menu=False), style="yellow")
+
     while True:
+        ui.set_header(redraw_results)
         try:
             save_format = ui.prompt_single_select(
                 "Select save format:",
@@ -608,6 +773,7 @@ def handle_save_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
             return "back"
 
         while True:
+            ui.set_header(redraw_results)
             try:
                 destination = ui.prompt_text(
                     "Enter file path to save",
@@ -621,6 +787,7 @@ def handle_save_menu(ui: TerminalUI, artifacts: RunArtifacts) -> str:
             save_results(artifacts, Path(destination), save_format)
             ui.print_message(f"Saved: {destination}", style="green")
 
+            ui.set_header(redraw_results)
             try:
                 next_action = ui.prompt_single_select(
                     "What next?",
@@ -652,6 +819,9 @@ def save_results(artifacts: RunArtifacts, destination: Path, save_format: str) -
     raise ValueError(f"Unsupported save format: {save_format}")
 
 
+EXPORT_DIR = "dnscrypt-results"
+
+
 def build_default_export_name(
     artifacts: RunArtifacts,
     save_format: str,
@@ -661,11 +831,12 @@ def build_default_export_name(
     catalogs_slug = join_slug_parts(artifacts.summary.catalogs)
     protocols_slug = join_slug_parts(artifacts.summary.protocols)
     filters_slug = slugify_component(artifacts.summary.filter_selection)
-    return (
+    filename = (
         f"{date_prefix}-catalogs-{catalogs_slug}"
         f"-protos-{protocols_slug}"
         f"-filters-{filters_slug}.{save_format}"
     )
+    return str(Path(EXPORT_DIR) / filename)
 
 
 def join_slug_parts(values: tuple[str, ...]) -> str:

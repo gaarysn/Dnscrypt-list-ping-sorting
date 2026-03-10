@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 public-resolvers.json
 .dnscrypt-cache/
+dnscrypt-results/

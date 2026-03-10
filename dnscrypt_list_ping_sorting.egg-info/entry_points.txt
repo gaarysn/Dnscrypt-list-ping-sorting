@@ -1,0 +1,2 @@
+[console_scripts]
+dnscrypt-sorter = dnscrypt_sorter.cli:main
