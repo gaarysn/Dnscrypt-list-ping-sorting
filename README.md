@@ -1,127 +1,60 @@
 # DNSCrypt-Sorter
 
-```
- ____  _   _ ____                       _     ____             _
-|  _ \| \ | / ___|  ___ _ __ _   _ _ __ | |_  / ___|  ___  _ __| |_ ___ _ __
-| | | |  \| \___ \ / __| '__| | | | '_ \| __| \___ \ / _ \| '__| __/ _ \ '__|
-| |_| | |\  |___) | (__| |  | |_| | |_) | |_   ___) | (_) | |  | ||  __/ |
-|____/|_| \_|____/ \___|_|   \__, | .__/ \__| |____/ \___/|_|   \__\___|_|
-                              |___/|_|
-```
+Measure and rank DNS resolvers from the official DNSCrypt catalogs by latency.
 
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
-![Version 0.5.0](https://img.shields.io/badge/version-0.5.0-green)
-![License](https://img.shields.io/badge/license-MIT-yellow)
-
-**Measure and rank DNS resolvers from official DNSCrypt catalogs by latency.**
-
-DNSCrypt-Sorter loads resolver lists published at [dnscrypt.info](https://dnscrypt.info/), probes each server with TCP/ICMP pings, and presents results sorted by response time in a modern terminal UI.
-
----
+The tool loads resolver lists from `dnscrypt.info`, filters them by protocol and flags, probes each endpoint, and sorts the results by response time. It supports both an interactive terminal wizard and a command-line mode.
 
 ## Features
 
-- **Official catalogs** — `public-resolvers`, `relays`, `parental-control`, `opennic`, `onion-services`, `odoh-servers`, `odoh-relays`
-- **Multiple protocols** — DNSCrypt, DoH, ODoH, DNSCrypt relay, ODoH relay
-- **Flexible filters** — nofilter, nolog, DNSSEC, IPv4/IPv6, country
-- **Probe profiles** — `fast`, `balanced`, `deep` presets with manual overrides
-- **Interactive wizard** — step-by-step selection with back navigation (`0`) and `Ctrl+C` to return to main menu
-- **IP check** — view local and public IP addresses from the main menu
-- **Rich terminal UI** — animated progress, live counters, color-coded output, adaptive ASCII banner
-- **Export** — save results as TXT, JSON, or CSV with auto-generated filenames into `dnscrypt-results/`
+- Official catalogs: `public-resolvers`, `relays`, `parental-control`, `opennic`, `onion-services`, `odoh-servers`, `odoh-relays`
+- Protocol filters: `DNSCrypt`, `DoH`, `ODoH`, `DNSCrypt relay`, `ODoH relay`
+- Resolver filters: `nofilter`, `nolog`, `dnssec`, IP version, country
+- Probe profiles: `fast`, `balanced`, `deep`
+- Interactive terminal UI with progress indicators
+- JSON output for automation
+- Cache support for resolver catalogs
 
----
+## Requirements
 
-## Quick Start
+- Python 3.10+
+- Internet access for downloading catalogs and probing resolvers
+- `rich` for the enhanced terminal UI
+
+## Installation
 
 ```bash
-git clone https://github.com/Magalame/Dnscrypt-list-ping-sorting.git
-cd Dnscrypt-list-ping-sorting
+git clone https://github.com/gaarysn/DNSCrypt-Sorter.git
+cd DNSCrypt-Sorter
 python3 -m pip install -e .
 ```
 
-Launch the interactive wizard:
+## Run
+
+Interactive mode:
 
 ```bash
 dnscrypt-sorter
 ```
 
-Or run directly:
+Direct script run:
 
 ```bash
 python3 ping_dnscrypt.py
 ```
 
----
-
-## Interactive Wizard
-
-The default flow when running without flags:
-
-| Step | Action |
-|------|--------|
-| 1 | Main menu — **Start new check** or **Check IP** |
-| 2 | Select one or more catalogs |
-| 3 | Select one or more protocols |
-| 4 | Apply optional filters (or skip with *I don't know*) |
-| 5 | Choose result size — Top N or All |
-| 6 | Latency check runs with live progress |
-| 7 | View results, save, or return to main menu |
-
-- Type **`0`** at any step to go back.
-- Press **`Ctrl+C`** to return to the main menu; press again to exit.
-
----
-
-## CLI Reference
+Help for command-line options:
 
 ```bash
-python3 ping_dnscrypt.py [OPTIONS]
+python3 ping_dnscrypt.py --help
 ```
 
-### Catalogs & Protocols
+## Examples
 
-| Flag | Description |
-|------|-------------|
-| `--catalog NAME` | Select a catalog (repeatable) |
-| `--catalog all` | Load all catalogs |
-| `--list-catalogs` | Print available catalog names |
-| `--proto NAME` | Select a protocol (repeatable) |
-| `--list-protos` | Print available protocol names |
+Check the default catalog with the balanced probe profile:
 
-### Filters
-
-| Flag | Description |
-|------|-------------|
-| `--require-nofilter` | Only resolvers with no filtering |
-| `--require-nolog` | Only resolvers with no logging |
-| `--dnssec-only` | Only DNSSEC-validating resolvers |
-| `--ip-version any\|ipv4\|ipv6` | Filter by IP version |
-| `--country NAME` | Filter by country (repeatable) |
-
-### Probing
-
-| Flag | Description |
-|------|-------------|
-| `--profile fast\|balanced\|deep` | Probe profile preset |
-| `-n`, `--number-ping` | Number of probe attempts |
-| `-p`, `--ping-delay` | Delay between pings (seconds) |
-| `-s`, `--server-delay` | Delay between servers (seconds) |
-| `-m`, `--time-out` | Probe timeout (seconds) |
-| `--workers` | Concurrent worker threads |
-| `--tcp-only` | Disable ICMP fallback |
-
-### Output
-
-| Flag | Description |
-|------|-------------|
-| `--top N` | Show fastest N results |
-| `--all` | Show all successful results |
-| `--stamp-mode compact\|full\|hidden` | SDNS stamp display mode |
-| `--json` | Emit JSON output |
-| `--cache-dir PATH` | Catalog cache directory |
-
-### Examples
+```bash
+python3 ping_dnscrypt.py
+```
 
 Top 10 DNSCrypt resolvers with no filtering and no logging, IPv4 only:
 
@@ -129,53 +62,79 @@ Top 10 DNSCrypt resolvers with no filtering and no logging, IPv4 only:
 python3 ping_dnscrypt.py \
   --catalog public-resolvers \
   --proto DNSCrypt \
-  --require-nofilter --require-nolog \
+  --require-nofilter \
+  --require-nolog \
   --ip-version ipv4 \
-  --profile balanced -t --top 10
+  --profile balanced \
+  --top 10
 ```
 
 All DoH endpoints in Germany:
 
 ```bash
 python3 ping_dnscrypt.py \
-  --catalog all --proto DoH \
+  --catalog all \
+  --proto DoH \
   --country Germany \
-  --profile deep -t --all
+  --profile deep \
+  --all
 ```
 
-JSON output with full stamps:
+JSON output:
 
 ```bash
 python3 ping_dnscrypt.py \
-  --catalog public-resolvers --proto all \
-  --top 25 --json
+  --catalog public-resolvers \
+  --proto all \
+  --top 25 \
+  --json
 ```
 
----
+## Common Flags
 
-## Probe Profiles
+### Catalogs and protocols
 
-| Profile | Attempts | Timeout | Workers | Use case |
-|---------|----------|---------|---------|----------|
-| `fast` | 3 | 2 s | 32 | Quick scan |
-| `balanced` | 5 | 3 s | 16 | Default |
-| `deep` | 10 | 5 s | 8 | Thorough analysis |
+- `--catalog NAME` select a catalog, repeatable
+- `--catalog all` load every official catalog
+- `--list-catalogs` print supported catalogs and exit
+- `--proto NAME` select a protocol, repeatable
+- `--list-protos` print supported protocols and exit
 
-Override any preset parameter with the corresponding flag.
+### Filters
 
----
+- `--require-nofilter` keep only resolvers advertising no filtering
+- `--require-nolog` keep only resolvers advertising no logging
+- `--dnssec-only` keep only DNSSEC-validating resolvers
+- `--ip-version any|ipv4|ipv6` filter by address family
+- `--country NAME` filter by country, repeatable
 
-## Saving Results
+### Probing
 
-In interactive mode the wizard offers to save after displaying results. The default filename is auto-generated:
+- `--profile fast|balanced|deep` choose a probe preset
+- `-n, --number-ping` set the number of attempts
+- `-p, --ping-delay` delay between attempts
+- `-s, --server-delay` delay before each server
+- `-m, --time-out` per-attempt timeout
+- `-t, --threading` enable concurrent probes
+- `--workers` set the worker count
+- `--tcp-only` disable ICMP fallback
 
-```
-dnscrypt-results/20260310-public-resolvers-dnscrypt-nofilter-nolog.csv
-```
+### Output
 
-The `dnscrypt-results/` directory is created automatically and is listed in `.gitignore`.
+- `--top N` show the fastest `N` results
+- `--all` show all successful results
+- `--stamp-mode compact|full|hidden` control SDNS stamp display
+- `--json` print machine-readable JSON
+- `--cache-dir PATH` set the catalog cache directory
 
----
+## Project Layout
+
+- `dnscrypt_sorter/cli.py` main application logic and CLI
+- `dnscrypt_sorter/source.py` catalog loading and parsing
+- `dnscrypt_sorter/filters.py` resolver filters
+- `dnscrypt_sorter/latency.py` latency measurement
+- `dnscrypt_sorter/ui.py` terminal UI
+- `ping_dnscrypt.py` direct script entry point
 
 ## Development
 
@@ -183,13 +142,9 @@ The `dnscrypt-results/` directory is created automatically and is listed in `.gi
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-
-# Run tests
 python3 -m pytest tests/ -v
 ```
 
----
+## License
 
-## Credits
-
-Original project by [Magalame](https://github.com/Magalame/Dnscrypt-list-ping-sorting) — a program to ping and sort the DNS servers proposed by [dnscrypt.info](https://dnscrypt.info/). Many thanks to the original author for the idea and the initial implementation.
+MIT
